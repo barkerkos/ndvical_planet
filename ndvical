@@ -1,0 +1,168 @@
+"""
+Created on Wed Jun  8 15:17:42 2022
+
+@author: zhihengl
+"""
+
+import glob
+import numpy as np
+import rasterio
+from rasterio.merge import merge
+import os
+import scipy.signal
+
+###############################################calculate ndvi#########################################################
+# list_tif = glob.glob('/projectnb/planet/inl/2020/20201014_180225_*_SR.tif') # cant read this image
+#################### change time here#####################
+year = '2020'
+time = '202001??'
+mode = 1  ####### mode = 1:mean, mode = 2: max#############
+##########################################################
+list_tif = glob.glob('/projectnb/planet/inl/'+ year + '/' + time + '_*_SR.tif')
+out_path = '/projectnb/urbanclimate/zhihengl/ndvi/'
+print(len(list_tif))
+count = 1
+
+for tif in list_tif:
+    try:
+        in_ds = rasterio.open(tif)
+        (filepath, fullname) = os.path.split(tif)
+        (prename, suffix) = os.path.splitext(fullname)
+        if in_ds is None:
+            print('Could not open the file ' + tif)
+        else:
+            blue = np.ma.masked_equal(in_ds.read(1) / 10000, 0)
+            green = np.ma.masked_equal(in_ds.read(2) / 10000, 0)
+            red = np.ma.masked_equal(in_ds.read(3) / 10000, 0)
+            nir = np.ma.masked_equal(in_ds.read(4) / 10000, 0)
+            np.seterr(divide='ignore', invalid='ignore')
+            # cloud index
+            ci_1 = (3 * nir.astype(float)) / (red.astype(float) + green.astype(float) + blue.astype(float))
+            ci_2 = (blue.astype(float) + green.astype(float) + red.astype(float) + nir.astype(float)) / 4
+            csi = nir
+            # threshold for cloud mask
+            t1 = 1
+            T1 = t1
+            t2 = 1 / 6
+            T2 = np.mean(ci_2) + t2 * (np.max(ci_2) - np.mean(ci_2))
+            t3 = 1 / 2
+            T3 = np.min(csi) + t3 * (np.mean(csi) - np.min(csi))
+            t4 = 4 / 5
+            T4 = np.min(blue) + t4 * (np.mean(blue) - np.min(blue))
+            # T5 = 150
+            # T6 = 170
+            T7 = 7
+            T8 = 7
+            # cloud mask, 1 for cloud 0 for non-cloud
+            T1_index = np.less(np.abs(ci_1 - 1), T1)
+            T1_mask = np.zeros(blue.shape)
+            T1_mask[T1_index] = 1
+            T2_index = np.greater(ci_2, T2)
+            T2_mask = np.zeros(blue.shape)
+            T2_mask[T2_index] = 1
+            cloud_mask = T1_mask * T2_mask
+            cloud_mask_final = scipy.signal.medfilt2d(cloud_mask, kernel_size=T7)
+            # cloud shadow mask, 1 for shadow 0 for non-shadow
+            T3_index = np.less(csi, T3)
+            T3_mask = np.zeros(blue.shape)
+            T3_mask[T3_index] = 1
+            # print(T4)
+            T4_index = np.less(blue, T4)
+            T4_mask = np.zeros(blue.shape)
+            T4_mask[T4_index] = 1
+            shadow_mask = T3_mask * T4_mask
+            shadow_mask_final = scipy.signal.medfilt2d(shadow_mask, kernel_size=7)
+            # remove clouds and shadow, convert mask, 0 for clouds/shadow 1 for non-clouds/non-shadow
+            cloud_mask_final = cloud_mask_final - 1
+            cloud_mask_final[cloud_mask_final == -1] = 1
+            shadow_mask_final = shadow_mask_final - 1
+            shadow_mask_final[shadow_mask_final == -1] = 1
+            # print(np.min(cloud_mask_final),np.max(cloud_mask_final))
+            # final_mask = cloud_mask_final*shadow_mask_final
+            # final_mask[final_mask==0] = np.nan
+            # print(np.min(final_mask))
+            # print(np.max(final_mask))
+
+            # ndvi
+            ndvi = (nir.astype(float) - red.astype(float)) / (nir.astype(float) + red.astype(float))
+            # apply mask
+            ndvi_final = np.ma.array(ndvi, mask=cloud_mask_final)
+            ndvi_final = np.ma.array(ndvi_final, mask=shadow_mask_final)
+
+            # copy metadata
+            kwargs = in_ds.meta
+            kwargs.update(dtype=rasterio.float32,
+                          count=1)
+            # save NDVI image
+            with rasterio.open(out_path + prename + '_ndvi' + '.tif', 'w', **kwargs) as dst:
+                dst.write_band(1, ndvi_final.astype(rasterio.float32))
+
+            print(count, ' finished')
+            count = count + 1
+
+            # with rasterio.open(out_path+prename+'_cloud'+'.tif','w',**kwargs) as dst:
+            #    dst.write_band(1,cloud_mask_final.astype(rasterio.float32))
+            # with rasterio.open(out_path+prename+'_shadow'+'.tif','w',**kwargs) as dst:
+            #    dst.write_band(1,shadow_mask_final.astype(rasterio.float32))
+    except Exception as e:
+        print('1 image pass')
+        pass
+    continue
+'''
+###########################################merge images######################################################
+list_ndvitif = glob.glob('/projectnb/urbanclimate/zhihengl/ndvi/'+time+'_*_ndvi.tif')
+#print(len(list_ndvitif))
+output_path = '/projectnb/urbanclimate/zhihengl/ndvi_merged/'
+raster_to_mosiac = []
+
+def copy_mean(merged_data, new_data, merged_mask, new_mask, **kwargs): # https://www.233tw.com/python/82090
+    mask = np.empty_like(merged_mask, dtype="bool")
+    np.logical_or(merged_mask, new_mask, out=mask)
+    np.logical_not(mask, out=mask)
+    np.add(merged_data,new_data,out=merged_data,where=mask)
+    np.true_divide(merged_data,2,out=merged_data,where=mask,casting='unsafe')
+    np.logical_not(new_mask, out=mask)
+    np.logical_and(merged_mask, mask, out=mask)
+    np.copyto(merged_data, new_data, where=mask, casting="unsafe")
+
+for p in list_ndvitif:
+    raster = rasterio.open(p)
+    raster_to_mosiac.append(raster)
+
+(filepath, fullname) = os.path.split(list_ndvitif[0])
+(prename, suffix) = os.path.splitext(fullname)
+yearmonth = prename[0:6]
+
+#########################################merge mode mean or max here############################
+if mode == 1:
+    print('mean')
+    mosaic,output = merge(raster_to_mosiac,method=copy_mean)
+    output_meta = raster.meta.copy()
+    output_meta.update(
+        {"driver": "GTiff",
+         "height": mosaic.shape[1],
+         "width": mosaic.shape[2],
+         "transform": output,
+         }
+    )
+    with rasterio.open(output_path+yearmonth+'ndvi_merged_mean'+'.tif', 'w', **output_meta) as m:
+        m.write(mosaic)
+
+if mode == 2:
+    print('max')
+    mosaic,output = merge(raster_to_mosiac,method='max')
+    output_meta = raster.meta.copy()
+    output_meta.update(
+        {"driver": "GTiff",
+         "height": mosaic.shape[1],
+         "width": mosaic.shape[2],
+         "transform": output,
+         }
+    )
+    with rasterio.open(output_path+yearmonth+'ndvi_merged_max'+'.tif', 'w', **output_meta) as m:
+        m.write(mosaic)
+
+############################################################################################
+
+print(yearmonth,' merge finished')
+'''
